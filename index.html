@@ -22,7 +22,6 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
     
-    // 여러 CORS 프록시 순차 시도
     const PROXIES = [
       'https://api.allorigins.win/raw?url=',
       'https://cors.sh/',
@@ -39,9 +38,7 @@
           const res = await fetch(fullUrl);
           if (res.ok) return await res.json();
           lastError = new Error(`HTTP ${res.status} from ${proxy}`);
-        } catch (e) {
-          lastError = e;
-        }
+        } catch (e) { lastError = e; }
       }
       throw lastError || new Error('모든 프록시 실패');
     }
@@ -193,6 +190,7 @@
       const [chartsData, setChartsData] = useState({});
       const [lastScan, setLastScan] = useState('-');
       const [showDetail, setShowDetail] = useState(false);
+      const [scannedCount, setScannedCount] = useState(0);
 
       const runScan = async () => {
         setStatus('loading');
@@ -202,42 +200,66 @@
         setShowDetail(false);
         try {
           const markets = await fetchKRWMarkets();
+          // 거래대금 상위 30개만 스캔
           const tickers = await fetchTickers(markets.slice(0, 50).map(m => m.market));
+          
+          // 거래대금 순으로 정렬
+          const sorted = markets.slice(0, 50).map(m => ({
+            m, t: tickers.find(t => t.market === m.market)
+          })).filter(x => x.t).sort((a,b) => b.t.acc_trade_price_24h - a.t.acc_trade_price_24h);
+
           const results = [];
-          for (let i = 0; i < 30; i += 5) {
-            const batch = markets.slice(i, i + 5);
-            const promises = batch.map(async (m) => {
-              const ticker = tickers.find(t => t.market === m.market);
-              if (!ticker || ticker.acc_trade_price_24h < 1000000000) return null;
-              try {
-                const [c1H, c15M] = await Promise.all([
-                  fetchCandles(m.market, 'minutes', 100, 60),
-                  fetchCandles(m.market, 'minutes', 100, 15)
-                ]);
-                const closes1H = c1H.map(c => c.close);
-                const sma10_1H = sma(closes1H, 10);
-                const lastClose = closes1H[closes1H.length - 1];
-                const lastSma10 = sma10_1H[sma10_1H.length - 1];
-                if (!lastSma10) return null;
-                const isUptrend = lastClose > lastSma10;
-                const H = Math.max(...c1H.slice(-30).map(c => c.high));
-                const L = Math.min(...c1H.slice(-30).map(c => c.low));
-                const pos = (lastClose - L) / (H - L);
-                if (isUptrend && (pos < 0.3 || pos > 0.7)) {
-                  return {
-                    market: m.market, name: m.korean_name,
-                    price: ticker.trade_price,
-                    change: (ticker.signed_change_rate * 100).toFixed(2),
-                    value: (ticker.acc_trade_price_24h / 100000000).toFixed(1) + '억',
-                    pos: pos < 0.3 ? '하단' : '상단'
-                  };
-                }
-              } catch (e) { return null; }
-            });
-            const batchResults = await Promise.all(promises);
-            results.push(...batchResults.filter(r => r !== null));
+          let count = 0;
+          
+          for (const {m, t} of sorted.slice(0, 20)) {
+            count++;
+            try {
+              const [c1H, c15M] = await Promise.all([
+                fetchCandles(m.market, 'minutes', 100, 60),
+                fetchCandles(m.market, 'minutes', 100, 15)
+              ]);
+              
+              const closes1H = c1H.map(c => c.close);
+              const sma10_1H = sma(closes1H, 10);
+              const lastClose = closes1H[closes1H.length - 1];
+              const lastSma10 = sma10_1H[sma10_1H.length - 1];
+              
+              // 추세 판단 (완화: SMA 근처도 포함)
+              let trend = '횡보';
+              if (lastSma10) {
+                const diff = (lastClose - lastSma10) / lastSma10;
+                if (diff > 0.01) trend = '상승';
+                else if (diff < -0.01) trend = '하락';
+              }
+              
+              // 레인지 위치
+              const H = Math.max(...c1H.slice(-30).map(c => c.high));
+              const L = Math.min(...c1H.slice(-30).map(c => c.low));
+              const pos = (lastClose - L) / (H - L || 1);
+              let posLabel = '중간';
+              if (pos < 0.3) posLabel = '하단';
+              else if (pos > 0.7) posLabel = '상단';
+              
+              // 10SMA 눌림/후킹 판단
+              let pattern = '관찰';
+              if (lastSma10) {
+                if (lastClose > lastSma10 * 0.98 && lastClose < lastSma10 * 1.02) pattern = '10SMA 눌림';
+                else if (lastClose > lastSma10 * 1.02) pattern = '10SMA上方';
+                else pattern = '10SMA下方';
+              }
+              
+              results.push({
+                market: m.market, name: m.korean_name,
+                price: t.trade_price,
+                change: (t.signed_change_rate * 100).toFixed(2),
+                value: (t.acc_trade_price_24h / 100000000).toFixed(1) + '억',
+                pos: posLabel, trend, pattern
+              });
+            } catch (e) { /* 개별 실패는 무시 */ }
           }
-          setCandidates(results.slice(0, 20));
+          
+          setScannedCount(count);
+          setCandidates(results);
           setLastScan(new Date().toLocaleString());
           setStatus('ok');
         } catch (e) {
@@ -272,8 +294,9 @@
             <p className="text-gray-400 text-xs">업비트 KRW 자동 분석기</p>
             <div className="flex flex-wrap gap-2 mt-2 text-xs">
               <span className="badge bg-gray-700">API: <b className={status==='ok'?'text-green-400':status==='error'?'text-red-400':'text-yellow-400'}>{status}</b></span>
+              <span className="badge bg-gray-700">스캔: {scannedCount}개</span>
               <span className="badge bg-gray-700">후보: {candidates.length}</span>
-              <span className="badge bg-gray-700">스캔: {lastScan}</span>
+              <span className="badge bg-gray-700">시간: {lastScan}</span>
             </div>
             {errorMsg && <div className="mt-2 text-red-400 bg-red-900/30 p-2 rounded text-xs">⚠️ {errorMsg}</div>}
           </header>
@@ -282,9 +305,26 @@
             {status === 'loading' ? '🔄 스캔 중...' : '🔍 전체 스캔 시작'}
           </button>
 
+          {/* 후보 없음 메시지 */}
+          {status === 'ok' && candidates.length === 0 && (
+            <div className="mt-6 card p-6 text-center">
+              <div className="text-4xl mb-3">🔍</div>
+              <div className="text-white font-bold mb-2">현재 정밀분석 후보 없음</div>
+              <div className="text-gray-400 text-xs">
+                스캔한 {scannedCount}개 종목 중<br/>
+                사부식 조건에 부합하는 종목이 없습니다.<br/><br/>
+                • 데이터 부족 (미확인)<br/>
+                • G5 레인지 중간 50%<br/>
+                • 명확한 패턴 미발견<br/><br/>
+                <span className="text-yellow-400">다음 스캔을 기다리세요.</span>
+              </div>
+            </div>
+          )}
+
+          {/* 후보 목록 */}
           {candidates.length > 0 && !showDetail && (
             <div className="mt-4">
-              <h2 className="text-sm font-bold mb-2">1차 후보</h2>
+              <h2 className="text-sm font-bold mb-2">스캔 결과 ({candidates.length}개)</h2>
               <div className="space-y-2">
                 {candidates.map(c => (
                   <div key={c.market} onClick={() => selectCandidate(c)}
@@ -299,9 +339,11 @@
                         <div className={`text-xs ${c.change > 0 ? 'text-green-400' : 'text-red-400'}`}>{c.change}%</div>
                       </div>
                     </div>
-                    <div className="mt-2 flex gap-2 text-xs">
+                    <div className="mt-2 flex flex-wrap gap-1 text-xs">
                       <span className="badge bg-blue-900 text-blue-300">{c.value}</span>
+                      <span className={`badge ${c.trend==='상승'?'bg-green-900 text-green-300':c.trend==='하락'?'bg-red-900 text-red-300':'bg-gray-700 text-gray-300'}`}>{c.trend}</span>
                       <span className="badge bg-yellow-900 text-yellow-300">{c.pos}</span>
+                      <span className="badge bg-purple-900 text-purple-300">{c.pattern}</span>
                     </div>
                   </div>
                 ))}
@@ -309,6 +351,7 @@
             </div>
           )}
 
+          {/* 상세 분석 */}
           {analysis && selected && showDetail && (
             <div className="mt-4">
               <button onClick={() => setShowDetail(false)} className="text-blue-400 text-sm mb-3">← 목록으로</button>
@@ -362,7 +405,7 @@
               </div>
 
               <div className="card p-3 mb-3">
-                <h3 className="font-bold mb-2 text-red-400 text-sm">🚨 Critical Fail</h3>
+                <h3 className="font-bold mb-2 text-red-400 text-sm"> Critical Fail</h3>
                 <div className="space-y-1 text-xs">
                   {Object.entries(analysis.cf).map(([k, v]) => (
                     <div key={k} className="flex justify-between border-b border-gray-700 pb-1">
