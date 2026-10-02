@@ -22,25 +22,15 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
     
-    const PROXIES = [
-      'https://api.allorigins.win/raw?url=',
-      'https://cors.sh/',
-      'https://thingproxy.freeboard.io/fetch/',
-      'https://corsproxy.io/?'
-    ];
+    // 가장 안정적인 CORS 프록시 사용
+    const PROXY = 'https://api.allorigins.win/raw?url=';
     const BASE = 'https://api.upbit.com/v1';
 
     async function fetchWithProxy(url) {
-      let lastError;
-      for (const proxy of PROXIES) {
-        try {
-          const fullUrl = proxy + encodeURIComponent(url);
-          const res = await fetch(fullUrl);
-          if (res.ok) return await res.json();
-          lastError = new Error(`HTTP ${res.status} from ${proxy}`);
-        } catch (e) { lastError = e; }
-      }
-      throw lastError || new Error('모든 프록시 실패');
+      const fullUrl = PROXY + encodeURIComponent(url);
+      const res = await fetch(fullUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
     }
 
     async function fetchKRWMarkets() {
@@ -126,7 +116,7 @@
         const H = Math.max(...candles1H.slice(-50).map(c => c.high));
         const L = Math.min(...candles1H.slice(-50).map(c => c.low));
         const current = candles1H[candles1H.length-1].close;
-        const pos = (current - L) / (H - L);
+        const pos = (current - L) / (H - L || 1);
         const posPct = (pos * 100).toFixed(0);
         if (pos >= 0.25 && pos <= 0.75) g5 = { status: '진입 금지', pos: `중간 ${posPct}%` };
         else g5 = { status: '통과', pos: pos < 0.25 ? `하단 ${posPct}%` : `상단 ${posPct}%` };
@@ -190,7 +180,6 @@
       const [chartsData, setChartsData] = useState({});
       const [lastScan, setLastScan] = useState('-');
       const [showDetail, setShowDetail] = useState(false);
-      const [scannedCount, setScannedCount] = useState(0);
 
       const runScan = async () => {
         setStatus('loading');
@@ -200,23 +189,18 @@
         setShowDetail(false);
         try {
           const markets = await fetchKRWMarkets();
-          // 거래대금 상위 30개만 스캔
           const tickers = await fetchTickers(markets.slice(0, 50).map(m => m.market));
           
-          // 거래대금 순으로 정렬
+          // 거래대금 상위 20개를 무조건 목록에 표시 (필터링 완화)
           const sorted = markets.slice(0, 50).map(m => ({
             m, t: tickers.find(t => t.market === m.market)
-          })).filter(x => x.t).sort((a,b) => b.t.acc_trade_price_24h - a.t.acc_trade_price_24h);
+          })).filter(x => x.t).sort((a,b) => b.t.acc_trade_price_24h - a.t.acc_trade_price_24h).slice(0, 20);
 
           const results = [];
-          let count = 0;
-          
-          for (const {m, t} of sorted.slice(0, 20)) {
-            count++;
+          for (const {m, t} of sorted) {
             try {
-              const [c1H, c15M] = await Promise.all([
-                fetchCandles(m.market, 'minutes', 100, 60),
-                fetchCandles(m.market, 'minutes', 100, 15)
+              const [c1H] = await Promise.all([
+                fetchCandles(m.market, 'minutes', 100, 60)
               ]);
               
               const closes1H = c1H.map(c => c.close);
@@ -224,7 +208,6 @@
               const lastClose = closes1H[closes1H.length - 1];
               const lastSma10 = sma10_1H[sma10_1H.length - 1];
               
-              // 추세 판단 (완화: SMA 근처도 포함)
               let trend = '횡보';
               if (lastSma10) {
                 const diff = (lastClose - lastSma10) / lastSma10;
@@ -232,7 +215,6 @@
                 else if (diff < -0.01) trend = '하락';
               }
               
-              // 레인지 위치
               const H = Math.max(...c1H.slice(-30).map(c => c.high));
               const L = Math.min(...c1H.slice(-30).map(c => c.low));
               const pos = (lastClose - L) / (H - L || 1);
@@ -240,30 +222,21 @@
               if (pos < 0.3) posLabel = '하단';
               else if (pos > 0.7) posLabel = '상단';
               
-              // 10SMA 눌림/후킹 판단
-              let pattern = '관찰';
-              if (lastSma10) {
-                if (lastClose > lastSma10 * 0.98 && lastClose < lastSma10 * 1.02) pattern = '10SMA 눌림';
-                else if (lastClose > lastSma10 * 1.02) pattern = '10SMA上方';
-                else pattern = '10SMA下方';
-              }
-              
               results.push({
                 market: m.market, name: m.korean_name,
                 price: t.trade_price,
                 change: (t.signed_change_rate * 100).toFixed(2),
                 value: (t.acc_trade_price_24h / 100000000).toFixed(1) + '억',
-                pos: posLabel, trend, pattern
+                pos: posLabel, trend
               });
-            } catch (e) { /* 개별 실패는 무시 */ }
+            } catch (e) { /* 개별 실패는 무시하고 계속 진행 */ }
           }
           
-          setScannedCount(count);
           setCandidates(results);
           setLastScan(new Date().toLocaleString());
           setStatus('ok');
         } catch (e) {
-          setErrorMsg('API 오류: ' + e.message);
+          setErrorMsg('API 오류: ' + e.message + ' (프록시 차단일 수 있음)');
           setStatus('error');
         }
       };
@@ -294,9 +267,8 @@
             <p className="text-gray-400 text-xs">업비트 KRW 자동 분석기</p>
             <div className="flex flex-wrap gap-2 mt-2 text-xs">
               <span className="badge bg-gray-700">API: <b className={status==='ok'?'text-green-400':status==='error'?'text-red-400':'text-yellow-400'}>{status}</b></span>
-              <span className="badge bg-gray-700">스캔: {scannedCount}개</span>
-              <span className="badge bg-gray-700">후보: {candidates.length}</span>
-              <span className="badge bg-gray-700">시간: {lastScan}</span>
+              <span className="badge bg-gray-700">후보: {candidates.length}개</span>
+              <span className="badge bg-gray-700">스캔: {lastScan}</span>
             </div>
             {errorMsg && <div className="mt-2 text-red-400 bg-red-900/30 p-2 rounded text-xs">⚠️ {errorMsg}</div>}
           </header>
@@ -305,26 +277,17 @@
             {status === 'loading' ? '🔄 스캔 중...' : '🔍 전체 스캔 시작'}
           </button>
 
-          {/* 후보 없음 메시지 */}
           {status === 'ok' && candidates.length === 0 && (
             <div className="mt-6 card p-6 text-center">
-              <div className="text-4xl mb-3">🔍</div>
-              <div className="text-white font-bold mb-2">현재 정밀분석 후보 없음</div>
-              <div className="text-gray-400 text-xs">
-                스캔한 {scannedCount}개 종목 중<br/>
-                사부식 조건에 부합하는 종목이 없습니다.<br/><br/>
-                • 데이터 부족 (미확인)<br/>
-                • G5 레인지 중간 50%<br/>
-                • 명확한 패턴 미발견<br/><br/>
-                <span className="text-yellow-400">다음 스캔을 기다리세요.</span>
-              </div>
+              <div className="text-4xl mb-3">⚠️</div>
+              <div className="text-white font-bold mb-2">데이터 로드 실패</div>
+              <div className="text-gray-400 text-xs">프록시 서버가 업비트 API를 차단하고 있습니다.<br/>잠시 후 다시 시도해주세요.</div>
             </div>
           )}
 
-          {/* 후보 목록 */}
           {candidates.length > 0 && !showDetail && (
             <div className="mt-4">
-              <h2 className="text-sm font-bold mb-2">스캔 결과 ({candidates.length}개)</h2>
+              <h2 className="text-sm font-bold mb-2">거래대금 상위 20개 종목</h2>
               <div className="space-y-2">
                 {candidates.map(c => (
                   <div key={c.market} onClick={() => selectCandidate(c)}
@@ -343,7 +306,6 @@
                       <span className="badge bg-blue-900 text-blue-300">{c.value}</span>
                       <span className={`badge ${c.trend==='상승'?'bg-green-900 text-green-300':c.trend==='하락'?'bg-red-900 text-red-300':'bg-gray-700 text-gray-300'}`}>{c.trend}</span>
                       <span className="badge bg-yellow-900 text-yellow-300">{c.pos}</span>
-                      <span className="badge bg-purple-900 text-purple-300">{c.pattern}</span>
                     </div>
                   </div>
                 ))}
@@ -351,7 +313,6 @@
             </div>
           )}
 
-          {/* 상세 분석 */}
           {analysis && selected && showDetail && (
             <div className="mt-4">
               <button onClick={() => setShowDetail(false)} className="text-blue-400 text-sm mb-3">← 목록으로</button>
@@ -405,7 +366,7 @@
               </div>
 
               <div className="card p-3 mb-3">
-                <h3 className="font-bold mb-2 text-red-400 text-sm"> Critical Fail</h3>
+                <h3 className="font-bold mb-2 text-red-400 text-sm">🚨 Critical Fail</h3>
                 <div className="space-y-1 text-xs">
                   {Object.entries(analysis.cf).map(([k, v]) => (
                     <div key={k} className="flex justify-between border-b border-gray-700 pb-1">
