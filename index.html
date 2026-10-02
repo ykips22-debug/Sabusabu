@@ -10,35 +10,47 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
   <style>
-    body { background:#0b0f17; color:#e5e7eb; font-family:system-ui; -webkit-tap-highlight-color:transparent; }
+    body { background:#0b0f17; color:#e5e7eb; font-family:system-ui; }
     .card { background:#1f2937; border:1px solid #374151; border-radius:12px; }
     .btn-primary { background:#2563eb; color:white; padding:14px 20px; border-radius:10px; font-weight:bold; width:100%; font-size:16px; }
     .btn-primary:disabled { background:#4b5563; }
     .badge { display:inline-block; padding:2px 8px; border-radius:6px; font-size:12px; font-weight:bold; }
-    ::-webkit-scrollbar { width:6px; height:6px; }
-    ::-webkit-scrollbar-thumb { background:#374151; border-radius:3px; }
   </style>
 </head>
 <body>
   <div id="root"></div>
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
-    const BASE = 'https://corsproxy.io/?https://api.upbit.com/v1';
+
+    // 업비트 API 직접 호출 (CORS 허용됨)
+    const BASE = 'https://api.upbit.com/v1';
+
+    async function fetchWithRetry(url, retries = 3) {
+      for (let i = 0; i < retries; i++) {
+        try {
+          const res = await fetch(url);
+          if (res.ok) return await res.json();
+          if (res.status === 429) {
+            await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+            continue;
+          }
+          throw new Error(`HTTP ${res.status}`);
+        } catch (e) {
+          if (i === retries - 1) throw e;
+          await new Promise(r => setTimeout(r, 1000));
+        }
+      }
+    }
 
     async function fetchKRWMarkets() {
-      const res = await fetch(`${BASE}/market/all`);
-      if (!res.ok) throw new Error('마켓 조회 실패');
-      const all = await res.json();
-      return all.filter(m => m.market.startsWith('KRW-'));
+      return await fetchWithRetry(`${BASE}/market/all`);
     }
 
     async function fetchCandles(market, unit, count = 200, minutes) {
       const path = unit === 'days'
         ? `${BASE}/candles/days?market=${market}&count=${count}`
         : `${BASE}/candles/minutes/${minutes}?market=${market}&count=${count}`;
-      const res = await fetch(path);
-      if (!res.ok) throw new Error(`캔들 조회 실패: ${market}`);
-      const raw = await res.json();
+      const raw = await fetchWithRetry(path);
       return raw.map(c => ({
         timestamp: new Date(c.candle_date_time_kst).getTime(),
         open: c.open_price, high: c.high_price, low: c.low_price, close: c.trade_price,
@@ -48,9 +60,7 @@
 
     async function fetchTickers(markets) {
       const chunk = markets.slice(0, 100).join(',');
-      const res = await fetch(`${BASE}/ticker?markets=${chunk}`);
-      if (!res.ok) throw new Error('티커 조회 실패');
-      return await res.json();
+      return await fetchWithRetry(`${BASE}/ticker?markets=${chunk}`);
     }
 
     function sma(values, period) {
@@ -246,7 +256,7 @@
           setChartsData({ '1D': c1D, '4H': c4H, '1H': c1H, '15M': c15M, '5M': c5M });
           setAnalysis(analyze(c1D, c1H, c15M));
         } catch (e) {
-          setErrorMsg('상세 데이터 로딩 실패: ' + e.message);
+          setErrorMsg('상세 데이터 로딩 패: ' + e.message);
         }
       };
 
@@ -260,7 +270,7 @@
               <span className="badge bg-gray-700">후보: {candidates.length}</span>
               <span className="badge bg-gray-700">스캔: {lastScan}</span>
             </div>
-            {errorMsg && <div className="mt-2 text-red-400 bg-red-900/30 p-2 rounded text-xs">⚠️ {errorMsg}</div>}
+            {errorMsg && <div className="mt-2 text-red-400 bg-red-900/30 p-2 rounded text-xs">️ {errorMsg}</div>}
           </header>
 
           <button onClick={runScan} disabled={status==='loading'} className="btn-primary">
@@ -359,7 +369,7 @@
               </div>
 
               <div className="card p-3">
-                <h3 className="font-bold mb-2 text-blue-400 text-sm">📌 최종 판단</h3>
+                <h3 className="font-bold mb-2 text-blue-400 text-sm"> 최종 판단</h3>
                 <div className="text-xs space-y-1">
                   <div><b>G1 목표:</b> {analysis.g1.target}원</div>
                   <div><b>G1 손절:</b> {analysis.g1.stop}원</div>
